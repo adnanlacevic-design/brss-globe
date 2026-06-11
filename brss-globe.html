@@ -57,49 +57,6 @@
   }
   #brss-canvas:active { cursor: grabbing; }
 
-  /* ---------- Top controls (matches reference screenshot) ---------- */
-  .brss-top-bar {
-    position: absolute;
-    top: 24px;
-    left: 50%;
-    transform: translateX(-50%);
-    display: flex;
-    gap: 12px;
-    z-index: 10;
-  }
-  .brss-btn {
-    font-family: 'IBM Plex Sans', sans-serif;
-    font-size: 14px;
-    font-weight: 500;
-    padding: 12px 22px;
-    border-radius: 999px;
-    border: 1px solid transparent;
-    cursor: pointer;
-    transition: transform .18s ease, background .18s ease, border-color .18s ease;
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
-    text-decoration: none;
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    letter-spacing: 0.01em;
-  }
-  .brss-btn:hover { transform: translateY(-1px); }
-  .brss-btn-primary {
-    background: #ff5b1f;
-    color: #fff;
-  }
-  .brss-btn-primary:hover { background: #ff6a35; }
-  .brss-btn-ghost {
-    background: rgba(255,255,255,0.06);
-    color: #fff;
-    border-color: rgba(255,255,255,0.18);
-  }
-  .brss-btn-ghost:hover {
-    background: rgba(255,255,255,0.12);
-    border-color: rgba(255,255,255,0.32);
-  }
-
   /* ---------- Brand / hint text ---------- */
   .brss-brand {
     position: absolute;
@@ -273,8 +230,6 @@
     .brss-brand, .brss-hint { font-size: 10px; bottom: 14px; }
     .brss-brand { left: 16px; }
     .brss-hint { right: 16px; }
-    .brss-top-bar { top: 16px; }
-    .brss-btn { padding: 10px 16px; font-size: 13px; }
   }
 </style>
 </head>
@@ -282,15 +237,6 @@
 <body>
 <div id="brss-globe-root">
   <canvas id="brss-canvas"></canvas>
-
-  <div class="brss-top-bar">
-    <a href="https://boundaryrss.myportfolio.com/contact" class="brss-btn brss-btn-primary" target="_blank" rel="noopener">
-      Book a demo <span>↗</span>
-    </a>
-    <a href="https://boundaryrss.myportfolio.com/work" class="brss-btn brss-btn-ghost" target="_blank" rel="noopener">
-      Explore service
-    </a>
-  </div>
 
   <div class="brss-brand">BOUNDARY <span>·</span> RSS</div>
   <div class="brss-hint">DRAG TO ROTATE · HOVER PINS</div>
@@ -422,7 +368,7 @@ const renderer = new THREE.WebGLRenderer({
   alpha: true,
   powerPreference: 'high-performance',
 });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
 renderer.setSize(root.clientWidth, root.clientHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.05;
@@ -435,8 +381,6 @@ controls.dampingFactor = 0.08;
 controls.rotateSpeed = 0.55;
 controls.enablePan = false;
 controls.enableZoom = false;
-controls.autoRotate = true;
-controls.autoRotateSpeed = 0.35;
 controls.minPolarAngle = Math.PI * 0.25;
 controls.maxPolarAngle = Math.PI * 0.75;
 
@@ -787,6 +731,10 @@ SURVEYS.forEach((survey, idx) => {
   });
 
   loaderEl.classList.add('is-done');
+
+  // Now that textures are in place, draw the scene. (We're on demand-render
+  // mode — without this call the user would only see the cleared canvas.)
+  if (window.__brssRequestRender) window.__brssRequestRender();
 })();
 
 /* =============================================================
@@ -888,16 +836,6 @@ function updateHover() {
   if (hoveredPin) hideCard();
 }
 
-// Pause auto-rotate when user interacts with card or drags
-let interactionResumeTimer = null;
-function pauseAutoRotate() {
-  controls.autoRotate = false;
-  clearTimeout(interactionResumeTimer);
-  interactionResumeTimer = setTimeout(() => { controls.autoRotate = true; }, 4000);
-}
-canvas.addEventListener('pointerdown', pauseAutoRotate);
-cardEl.addEventListener('pointerenter', () => { pauseAutoRotate(); });
-
 // Click pin: open the project page directly
 canvas.addEventListener('click', (ev) => {
   if (!hoveredPin) return;
@@ -905,34 +843,72 @@ canvas.addEventListener('click', (ev) => {
 });
 
 /* =============================================================
-   ANIMATION LOOP
+   ON-DEMAND RENDERING
+   We do NOT run a continuous requestAnimationFrame loop. That was
+   eating GPU/CPU and slowing parent-page animations (e.g. heading
+   intros in Webflow). Instead we render frames only when something
+   changes: the user drags, hovers, the window resizes, etc.
+   When everything is idle, render calls drop to zero and the
+   parent page gets the full machine back.
    ============================================================= */
 const clock = new THREE.Clock();
+let isAnimating = false;
+
 function animate() {
   const dt = clock.getDelta();
   const t  = clock.getElapsedTime();
 
-  // Subtle cloud drift independent of Earth
+  // Subtle ambience while we're rendering anyway
   clouds.rotation.y += dt * 0.018;
-
-  // Twinkle stars
   stars.material.uniforms.uTime.value = t;
 
-  // Pulse halos
+  // Pulse only the hovered pin; idle pins use static opacity
   pins.forEach(p => {
-    const base = (p === hoveredPin) ? 1.0 : 0.55;
-    const pulse = 0.85 + Math.sin(t * 2.0 + p.surfaceNormal.x * 4) * 0.15;
-    p.halo.material.opacity = base * pulse;
+    if (p === hoveredPin) {
+      p.halo.material.opacity = 0.85 + Math.sin(t * 2.0 + p.surfaceNormal.x * 4) * 0.15;
+    } else {
+      p.halo.material.opacity = 0.55;
+    }
   });
 
-  controls.update();
+  // OrbitControls.update() returns true while damping is still settling
+  const cameraMoved = controls.update();
+
   updateHover();
   if (hoveredPin) positionCardAtPin(hoveredPin);
 
   renderer.render(scene, camera);
+
+  // Keep rendering only while there is reason to (camera still drifting,
+  // or a pin is hovered so its halo needs to pulse). Otherwise stop.
+  if (cameraMoved || hoveredPin) {
+    requestAnimationFrame(animate);
+  } else {
+    isAnimating = false;
+  }
+}
+
+function requestRender() {
+  if (isAnimating) return;
+  isAnimating = true;
   requestAnimationFrame(animate);
 }
-animate();
+
+// Wake the renderer whenever state could have changed
+controls.addEventListener('change', requestRender);
+canvas.addEventListener('pointermove',  requestRender);
+canvas.addEventListener('pointerenter', requestRender);
+canvas.addEventListener('pointerleave', () => { hideCard(); requestRender(); });
+window.addEventListener('resize', requestRender);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') requestRender();
+});
+
+// Expose for the texture-loaded callback to kick the first frame
+window.__brssRequestRender = requestRender;
+
+// Kick the very first frame so the textured Earth appears
+requestRender();
 
 /* =============================================================
    RESPONSIVE
